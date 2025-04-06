@@ -1,0 +1,231 @@
+<?php
+/**
+ * Plugin Name: Auto API Generator
+ * Plugin URI: 
+ * Description: Automatically generates API endpoints based on your WordPress database structure and website configuration, and displays them in the WordPress admin panel.
+ * Version: 1.2
+ * Author: Aakash Dave
+ * Author URI: 
+ * License: GPLv2 or later
+ */
+
+// Exit if accessed directly.
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+/**
+ * Main Auto API Generator Class
+ */
+class Auto_API_Generator {
+
+    private $api_list = []; // Store API endpoints for displaying in the admin panel
+
+    public function __construct() {
+        add_action('rest_api_init', [$this, 'register_dynamic_routes']);
+        add_action('admin_menu', [$this, 'add_admin_menu']);
+        add_action('init', [$this, 'prepare_api_list']); // Ensure the API list is populated on init
+    }
+
+    /**
+     * Prepare API list for display in the admin panel.
+     */
+    public function prepare_api_list() {
+        $this->api_list = []; // Reset the list
+
+        global $wpdb;
+
+        // Add API routes for post types
+        $post_types = get_post_types(['public' => true], 'objects');
+        foreach ($post_types as $post_type) {
+            $endpoint = '/wp-json/auto-api/v1/' . $post_type->name;
+            $this->api_list[] = [
+                'name' => ucfirst($post_type->name),
+                'endpoint' => $endpoint,
+            ];
+        }
+
+        // Add API routes for taxonomies
+        $taxonomies = get_taxonomies(['public' => true], 'objects');
+        foreach ($taxonomies as $taxonomy) {
+            $endpoint = '/wp-json/auto-api/v1/' . $taxonomy->name;
+            $this->api_list[] = [
+                'name' => ucfirst($taxonomy->name),
+                'endpoint' => $endpoint,
+            ];
+        }
+
+        // Add API routes for custom tables
+        $tables = $wpdb->get_results("SHOW TABLES", ARRAY_N);
+        foreach ($tables as $table) {
+            $table_name = $table[0];
+            if (strpos($table_name, $wpdb->prefix) === 0) {
+                $endpoint_name = str_replace($wpdb->prefix, '', $table_name);
+                $endpoint = '/wp-json/auto-api/v1/' . $endpoint_name;
+                $this->api_list[] = [
+                    'name' => ucfirst($endpoint_name),
+                    'endpoint' => $endpoint,
+                ];
+            }
+        }
+
+        // Debug: Log the API list to verify it contains data.
+        error_log(print_r($this->api_list, true)); // Log to debug file
+    }
+
+    /**
+     * Register dynamic API routes.
+     */
+    public function register_dynamic_routes() {
+        global $wpdb;
+
+        // Register routes for WordPress post types
+        $post_types = get_post_types(['public' => true], 'objects');
+        foreach ($post_types as $post_type) {
+            register_rest_route('auto-api/v1', '/' . $post_type->name, [
+                'methods' => 'GET',
+                'callback' => function () use ($post_type) {
+                    return $this->get_content_data($post_type->name);
+                },
+                'permission_callback' => '__return_true',
+            ]);
+        }
+
+        // Register routes for taxonomies
+        $taxonomies = get_taxonomies(['public' => true], 'objects');
+        foreach ($taxonomies as $taxonomy) {
+            register_rest_route('auto-api/v1', '/' . $taxonomy->name, [
+                'methods' => 'GET',
+                'callback' => function () use ($taxonomy) {
+                    return $this->get_taxonomy_data($taxonomy->name);
+                },
+                'permission_callback' => '__return_true',
+            ]);
+        }
+
+        // Register routes for custom database tables
+        $tables = $wpdb->get_results("SHOW TABLES", ARRAY_N);
+        foreach ($tables as $table) {
+            $table_name = $table[0];
+            if (strpos($table_name, $wpdb->prefix) === 0) {
+                $endpoint_name = str_replace($wpdb->prefix, '', $table_name);
+                register_rest_route('auto-api/v1', '/' . $endpoint_name, [
+                    'methods' => 'GET',
+                    'callback' => function () use ($table_name) {
+                        return $this->get_table_data($table_name);
+                    },
+                    'permission_callback' => '__return_true',
+                ]);
+            }
+        }
+    }
+
+    /**
+     * Get content data for a specific post type.
+     */
+    private function get_content_data($post_type) {
+        $posts = get_posts([
+            'post_type' => $post_type,
+            'numberposts' => -1,
+        ]);
+
+        $response = [];
+        foreach ($posts as $post) {
+            $response[] = [
+                'id' => $post->ID,
+                'title' => $post->post_title,
+                'content' => $post->post_content,
+                'excerpt' => $post->post_excerpt,
+                'date' => $post->post_date,
+                'author' => get_the_author_meta('display_name', $post->post_author),
+                'meta' => get_post_meta($post->ID),
+            ];
+        }
+
+        return rest_ensure_response($response);
+    }
+
+    /**
+     * Get taxonomy data for a specific taxonomy.
+     */
+    private function get_taxonomy_data($taxonomy) {
+        $terms = get_terms([
+            'taxonomy' => $taxonomy,
+            'hide_empty' => false,
+        ]);
+
+        $response = [];
+        foreach ($terms as $term) {
+            $response[] = [
+                'id' => $term->term_id,
+                'name' => $term->name,
+                'slug' => $term->slug,
+                'description' => $term->description,
+            ];
+        }
+
+        return rest_ensure_response($response);
+    }
+
+    /**
+     * Get data from a custom database table.
+     */
+    private function get_table_data($table_name) {
+        global $wpdb;
+
+        $results = $wpdb->get_results("SELECT * FROM $table_name", ARRAY_A);
+        return rest_ensure_response($results);
+    }
+
+    /**
+     * Add an admin menu to display API endpoints.
+     */
+    public function add_admin_menu() {
+        add_menu_page(
+            'Auto API Generator',
+            'Auto API List',
+            'manage_options',
+            'auto-api-list',
+            [$this, 'render_admin_page'],
+            'dashicons-rest-api',
+            80
+        );
+    }
+
+    /**
+     * Render the admin page to display the API list.
+     */
+    public function render_admin_page() {
+        ?>
+        <div class="wrap">
+            <h1>Auto API List</h1>
+            <p>Below is the list of automatically generated API endpoints:</p>
+            <table class="widefat fixed" cellspacing="0">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Endpoint</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php
+                    if (!empty($this->api_list)) {
+                        foreach ($this->api_list as $api): ?>
+                            <tr>
+                                <td><?php echo esc_html($api['name']); ?></td>
+                                <td><code><?php echo esc_html($api['endpoint']); ?></code></td>
+                            </tr>
+                        <?php endforeach;
+                    } else {
+                        echo '<tr><td colspan="2">No API endpoints found.</td></tr>';
+                    }
+                    ?>
+                </tbody>
+            </table>
+        </div>
+        <?php
+    }
+}
+
+// Initialize the plugin.
+new Auto_API_Generator();
